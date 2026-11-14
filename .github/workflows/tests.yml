@@ -1,0 +1,155 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekday morning run: the app under test is a live site that changes.
+    - cron: '0 6 * * 1-5'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  BASE_URL: ${{ vars.BASE_URL || 'https://practicesoftwaretesting.com' }}
+  API_URL: ${{ vars.API_URL || 'https://api.practicesoftwaretesting.com' }}
+  AI_ANALYSIS: ${{ vars.AI_ANALYSIS || 'false' }}
+  AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5-5' }}
+  # ANTHROPIC_API_KEY is passed only to the steps that run tests, never to
+  # `npm ci`, so dependency install scripts can't read it.
+
+jobs:
+  static:
+    name: typecheck · lint · unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npx playwright test --project=unit
+
+  api:
+    name: api
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright test --project=api
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: results-api
+          path: reports/
+          retention-days: 14
+
+  browsers:
+    name: ui · ${{ matrix.project }}
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { project: chromium, browser: chromium }
+          - { project: firefox, browser: firefox }
+          - { project: webkit, browser: webkit }
+          - { project: mobile-chrome, browser: chromium }
+          - { project: mobile-safari, browser: webkit }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      # Visual tests run in the Docker job below, where pixels are reproducible.
+      - run: npx playwright test --project=${{ matrix.project }} --grep-invert @visual
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: results-${{ matrix.project }}
+          path: |
+            reports/
+            test-results/
+          retention-days: 14
+
+  visual:
+    name: visual (Playwright container)
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npx playwright test --project=chromium --grep @visual
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: results-visual
+          path: |
+            reports/
+            test-results/
+          retention-days: 14
+
+  allure:
+    name: allure report
+    needs: [api, browsers, visual]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: downloaded
+      - name: Merge Allure results
+        run: |
+          mkdir -p reports/allure-results
+          find downloaded -path '*allure-results/*' -type f -exec cp {} reports/allure-results/ \;
+      - run: npm run report:allure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: reports/allure-report
+          retention-days: 14

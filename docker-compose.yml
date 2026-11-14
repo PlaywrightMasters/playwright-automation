@@ -1,0 +1,33 @@
+x-tests: &tests
+  build: .
+  ipc: host # recommended by Playwright for Chromium stability
+  environment:
+    BASE_URL: ${BASE_URL:-https://practicesoftwaretesting.com}
+    API_URL: ${API_URL:-https://api.practicesoftwaretesting.com}
+    AI_ANALYSIS: ${AI_ANALYSIS:-false}
+    AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  volumes:
+    - ./reports:/app/reports
+    - ./test-results:/app/test-results
+
+services:
+  # docker compose run --rm tests
+  tests:
+    <<: *tests
+
+  # docker compose run --rm visual
+  visual:
+    <<: *tests
+    command: ['npx', 'playwright', 'test', '--project=chromium', '--grep', '@visual']
+    volumes:
+      - ./reports:/app/reports
+      - ./test-results:/app/test-results
+      - ./tests/__screenshots__:/app/tests/__screenshots__
+
+  # docker compose run --rm visual-update   (writes Linux baselines used by CI)
+  visual-update:
+    <<: *tests
+    command: ['npx', 'playwright', 'test', '--project=chromium', '--grep', '@visual', '--update-snapshots']
+    volumes:
+      - ./tests/__screenshots__:/app/tests/__screenshots__
